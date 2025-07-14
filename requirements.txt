@@ -1,9 +1,22 @@
-whisperx
-torch
-torchaudio
-ffmpeg
-streamlit
-pyaudio
-faster-whisper
-librosa
-soundfile
+# Core Packages
+torch>=2.0.0
+torchaudio>=2.0.0
+transformers>=4.30.0
+numpy>=1.24.0
+scipy>=1.10.0
+PyYAML>=6.0.0
+omegaconf>=2.3.0
+pydantic>=2.0.0
+colorlog>=6.7.0
+tqdm>=4.65.0
+requests>=2.31.0
+packaging>=23.0
+click>=8.1.0
+
+# ASR Packages
+faster-whisper>=1.0.0
+ctranslate2>=4.0.0
+librosa>=0.10.0
+soundfile>=0.12.0
+pyaudio>=0.2.11
+pydub>=0.25.1
