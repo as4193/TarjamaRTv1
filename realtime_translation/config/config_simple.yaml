@@ -1,0 +1,39 @@
+# Simplified Configuration for Testing
+
+# System Settings
+system:
+  device: "auto"  # auto, cpu, cuda
+  log_level: "INFO"
+  max_workers: 4
+  buffer_size: 1024
+  output_dir: "outputs"
+
+# Audio Settings
+audio:
+  sample_rate: 16000
+  chunk_duration: 1.0
+  overlap_duration: 0.2
+  format: "wav"
+
+
+# Automatic Speech Recognition 
+asr:
+  model: "tiny"  # Use tiny model for fast testing
+  language: "arabic"
+  compute_type: "auto"  
+  local_files_only: true
+  beam_size: 1  
+  best_of: 1
+  temperature: 0.0
+  condition_on_previous_text: true
+  repetition_penalty: 1.1
+  vad_filter: true
+  chunk_length: 30
+  stride_length: 5
+
+
+development:
+  save_intermediate_outputs: true
+  debug_mode: false
+  test_audio_path: "tests/test_audio.wav"
+  output_dir: "logs/debug"
