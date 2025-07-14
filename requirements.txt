@@ -4,3 +4,6 @@ torchaudio
 ffmpeg
 streamlit
 pyaudio
+faster-whisper
+librosa
+soundfile
