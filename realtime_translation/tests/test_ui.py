@@ -4,6 +4,8 @@ import time
 import tempfile
 import os
 import warnings
+import threading
+import queue
 warnings.filterwarnings("ignore")
 
 # Fix LLVM/SVML issues
@@ -155,31 +157,221 @@ class TranscriptionEngine:
             else:
                 raise e
 
-def record_microphone(duration):
+class RealTimeRecorder:
+    def __init__(self, engine, language="auto"):
+        self.engine = engine
+        self.language = language
+        self.recording = False
+        self.audio_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        self.audio_stream = None
+        self.audio_obj = None
+        
+    def start_recording(self):
+        """Start real-time recording and transcription"""
+        if self.recording:
+            return
+            
+        self.recording = True
+        self.audio_queue = queue.Queue()
+        self.result_queue = queue.Queue()
+        
+        # Start audio recording thread
+        self.recording_thread = threading.Thread(target=self._recording_worker)
+        self.recording_thread.daemon = True
+        self.recording_thread.start()
+        
+        # Start transcription thread
+        self.transcription_thread = threading.Thread(target=self._transcription_worker)
+        self.transcription_thread.daemon = True
+        self.transcription_thread.start()
+    
+    def stop_recording(self):
+        """Stop recording and transcription"""
+        self.recording = False
+        
+        # Clean up audio stream
+        if self.audio_stream:
+            try:
+                self.audio_stream.stop_stream()
+                self.audio_stream.close()
+            except:
+                pass
+        if self.audio_obj:
+            try:
+                self.audio_obj.terminate()
+            except:
+                pass
+    
+    def _recording_worker(self):
+        """Worker thread for audio recording"""
+        try:
+            self.audio_obj = pyaudio.PyAudio()
+            self.audio_stream = self.audio_obj.open(
+                format=pyaudio.paInt16,
+                channels=1,
+                rate=16000,
+                input=True,
+                frames_per_buffer=1024
+            )
+            
+            chunk_size = 16000 * 2  
+            current_chunk = []
+            
+            while self.recording:
+                try:
+                    data = self.audio_stream.read(1024, exception_on_overflow=False)
+                    audio_data = np.frombuffer(data, dtype=np.int16)
+                    current_chunk.extend(audio_data)
+                    
+                    # Process chunk when it reaches target size
+                    if len(current_chunk) >= chunk_size:
+                        # Convert to float32 properly to avoid ONNX errors
+                        audio_float = np.array(current_chunk, dtype=np.float32) / 32768.0
+                        self.audio_queue.put(audio_float)
+                        current_chunk = current_chunk[-int(chunk_size * 0.2):]  # Keep 20% overlap
+                        
+                except Exception as e:
+                    if self.recording:  # Only log if we're still supposed to be recording
+                        print(f"Recording error: {e}")
+                    break
+            
+            # Process final chunk if exists
+            if current_chunk and self.recording:
+                audio_float = np.array(current_chunk, dtype=np.float32) / 32768.0
+                self.audio_queue.put(audio_float)
+                
+        except Exception as e:
+            self.result_queue.put({"error": f"Recording failed: {e}"})
+        finally:
+            self.stop_recording()
+    
+    def _transcription_worker(self):
+        """Worker thread for transcription"""
+        chunk_count = 0
+        full_transcription = ""
+        
+        while self.recording or not self.audio_queue.empty():
+            try:
+                # Get audio chunk with timeout
+                try:
+                    audio_chunk = self.audio_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                
+                # Skip very short chunks (reduced threshold for microphone)
+                if len(audio_chunk) < 4800:  # Less than 0.3 seconds
+                    continue
+                
+                chunk_count += 1
+                
+                # Create temporary file with proper float32 format
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                    try:
+                        # Analyze audio levels for debugging
+                        audio_rms = np.sqrt(np.mean(audio_chunk**2))
+                        audio_max = np.max(np.abs(audio_chunk))
+                        
+                        # Boost quiet microphone audio (common issue)
+                        if audio_max > 0:
+                            # Normalize to use more of the dynamic range
+                            boost_factor = min(0.8 / audio_max, 10.0)  # Cap boost at 10x
+                            audio_boosted = audio_chunk * boost_factor
+                        else:
+                            audio_boosted = audio_chunk
+                        
+                        # Ensure audio is float32 and in correct range
+                        audio_normalized = np.clip(audio_boosted, -1.0, 1.0).astype(np.float32)
+                        sf.write(tmp.name, audio_normalized, 16000)
+                        
+                        # Debug info (only for first few chunks)
+                        if chunk_count <= 3:
+                            print(f"Chunk {chunk_count}: RMS={audio_rms:.4f}, Max={audio_max:.4f}, Boost={boost_factor:.2f}x")
+                        
+                        # Transcribe chunk
+                        asr_language = None if self.language == "auto" else self.language
+                        result = self.engine.asr_engine.transcribe(tmp.name, language=asr_language)
+                        
+                        if result and result.get_full_text().strip():
+                            chunk_text = result.get_full_text().strip()
+                            full_transcription += " " + chunk_text
+                            
+                            self.result_queue.put({
+                                "chunk": chunk_count,
+                                "text": chunk_text,
+                                "full_text": full_transcription.strip(),
+                                "language": result.language,
+                                "is_final": False
+                            })
+                        else:
+                            # Debug info for first few chunks
+                            debug_msg = "(no speech)"
+                            if chunk_count <= 3:
+                                debug_msg += f" - chunk_len={len(audio_chunk)}, max_val={audio_max:.4f}"
+                            
+                            self.result_queue.put({
+                                "chunk": chunk_count,
+                                "text": debug_msg,
+                                "full_text": full_transcription.strip(),
+                                "is_final": False
+                            })
+                            
+                    finally:
+                        # Clean up temp file
+                        try:
+                            os.unlink(tmp.name)
+                        except:
+                            pass
+                        
+            except Exception as e:
+                self.result_queue.put({"error": f"Transcription error: {e}"})
+        
+        # Final result
+        self.result_queue.put({
+            "is_final": True, 
+            "full_text": full_transcription.strip(),
+            "total_chunks": chunk_count
+        })
+    
+    def get_results(self):
+        """Get transcription results (non-blocking)"""
+        results = []
+        while not self.result_queue.empty():
+            try:
+                result = self.result_queue.get_nowait()
+                results.append(result)
+            except queue.Empty:
+                break
+        return results
+
+def convert_audio(audio_file, target_path):
+    """Convert audio file to proper format for ASR"""
     try:
-        audio = pyaudio.PyAudio()
-        stream = audio.open(
-            format=pyaudio.paInt16,
-            channels=1,
-            rate=16000,
-            input=True,
-            frames_per_buffer=1024
-        )
+        audio = AudioSegment.from_file(audio_file)
+        # Convert to mono, 16kHz
+        audio = audio.set_frame_rate(16000).set_channels(1)
         
-        data = []
-        for i in range(int(16000 / 1024 * duration)):
-            chunk = stream.read(1024)
-            data.append(np.frombuffer(chunk, dtype=np.int16))
+        # Export as wav with proper format
+        audio.export(target_path, format="wav", parameters=["-acodec", "pcm_s16le"])
         
-        stream.stop_stream()
-        stream.close()
-        audio.terminate()
+        # Re-read and save as float32 to ensure compatibility
+        audio_data, sr = sf.read(target_path)
         
-        return np.concatenate(data)
+        # Ensure float32 format
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
         
+        # Ensure proper range [-1, 1]
+        if audio_data.max() > 1.0 or audio_data.min() < -1.0:
+            audio_data = np.clip(audio_data, -1.0, 1.0)
+        
+        # Re-save with correct format
+        sf.write(target_path, audio_data, 16000, subtype='FLOAT')
+        
+        return True
     except Exception as e:
-        st.error(f"Recording failed: {e}")
-        return np.array([])
+        st.error(f"Audio conversion failed: {e}")
+        return False
 
 def download_youtube(url):
     try:
@@ -203,8 +395,13 @@ def download_youtube(url):
                 for file in os.listdir(temp_dir):
                     if file.endswith('.wav'):
                         output_path = f"temp_youtube_{int(time.time())}.wav"
-                        os.rename(os.path.join(temp_dir, file), output_path)
-                        return output_path
+                        temp_file = os.path.join(temp_dir, file)
+                        
+                        # Convert to proper format
+                        if convert_audio(temp_file, output_path):
+                            return output_path
+                        else:
+                            return None
                         
             except Exception as ffmpeg_error:
                 if "ffmpeg" in str(ffmpeg_error).lower():
@@ -226,19 +423,14 @@ def download_youtube(url):
                             output_path = f"temp_youtube_{int(time.time())}.wav"
                             
                             try:
-                                # Convert with pydub
-                                audio = AudioSegment.from_file(input_path)
-                                audio = audio.set_frame_rate(16000).set_channels(1)
-                                audio.export(output_path, format="wav")
-                                return output_path
+                                if convert_audio(input_path, output_path):
+                                    return output_path
                             except PermissionError:
                                 # File might be locked, wait a bit and try again
                                 time.sleep(1)
                                 try:
-                                    audio = AudioSegment.from_file(input_path)
-                                    audio = audio.set_frame_rate(16000).set_channels(1)
-                                    audio.export(output_path, format="wav")
-                                    return output_path
+                                    if convert_audio(input_path, output_path):
+                                        return output_path
                                 except:
                                     continue
                 else:
@@ -256,20 +448,14 @@ def download_youtube(url):
             st.info("💡 Try a different YouTube URL or check your internet connection")
         return None
 
-def convert_audio(audio_file, target_path):
-    try:
-        audio = AudioSegment.from_file(audio_file)
-        audio = audio.set_frame_rate(16000).set_channels(1)
-        audio.export(target_path, format="wav")
-        return True
-    except Exception as e:
-        st.error(f"Audio conversion failed: {e}")
-        return False
-
-# Initialize
+# Initialize session state
 if 'engine' not in st.session_state:
     st.session_state.engine = TranscriptionEngine()
     st.session_state.models_loaded = False
+
+if 'recorder' not in st.session_state:
+    st.session_state.recorder = None
+    st.session_state.recording = False
 
 # UI
 st.title("🎤 Simple Speech Transcription")
@@ -297,7 +483,7 @@ if not st.session_state.models_loaded:
     st.stop()
 
 # Input method
-method = st.radio("Input:", ["Audio File", "YouTube Link", "Microphone"], horizontal=True)
+method = st.radio("Input:", ["Audio File", "YouTube Link", "Microphone (Real-time)"], horizontal=True)
 
 if method == "Audio File":
     st.subheader("Upload Audio")
@@ -306,59 +492,66 @@ if method == "Audio File":
     
     if file and st.button("Transcribe"):
         with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-            if convert_audio(file, tmp.name):
-                st.subheader("Transcription Results")
-                
-                # Create placeholders for streaming results
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                result_container = st.empty()
-                full_text_container = st.empty()
-                
-                start_time = time.time()
-                chunk_count = 0
-                
-                try:
-                    for result in st.session_state.engine.transcribe_streaming(tmp.name, language):
-                        if result.get("is_final"):
-                            progress_bar.progress(1.0)
-                            status_text.success("Transcription Complete!")
-                            
-                            # Show final stats
-                            processing_time = time.time() - start_time
-                            col1, col2 = st.columns(2)
-                            with col1:
-                                st.metric("Total Time", f"{processing_time:.2f}s")
-                            with col2:
-                                st.metric("Chunks Processed", chunk_count)
-                            
-                            if result.get("language"):
-                                st.info(f"Language: {LANGUAGES.get(result['language'], result['language'])}")
-                            break
-                        else:
-                            chunk_count += 1
-                            progress = min(chunk_count * 0.1, 0.9)  # Estimate progress
-                            progress_bar.progress(progress)
-                            
-                            status_text.text(f"Processing chunk {chunk_count}... ({result.get('chunk_start', 0):.1f}s)")
-                            
-                            if result.get("text"):
-                                # Show current chunk
-                                result_container.info(f"**Chunk {chunk_count}:** {result['text']}")
+            try:
+                if convert_audio(file, tmp.name):
+                    st.subheader("Transcription Results")
+                    
+                    # Create placeholders for streaming results
+                    progress_bar = st.progress(0)
+                    status_text = st.empty()
+                    result_container = st.empty()
+                    full_text_container = st.empty()
+                    
+                    start_time = time.time()
+                    chunk_count = 0
+                    
+                    try:
+                        for result in st.session_state.engine.transcribe_streaming(tmp.name, language):
+                            if result.get("is_final"):
+                                progress_bar.progress(1.0)
+                                status_text.success("Transcription Complete!")
                                 
-                                # Show accumulated text
-                                if result.get("full_text"):
-                                    full_text_container.success(f"**Full Text:** {result['full_text']}")
-                            
-                            time.sleep(0.05)  # Small delay for better UX
-                    
-                    if chunk_count == 0:
-                        st.warning("No speech detected in the audio file")
+                                # Show final stats
+                                processing_time = time.time() - start_time
+                                col1, col2 = st.columns(2)
+                                with col1:
+                                    st.metric("Total Time", f"{processing_time:.2f}s")
+                                with col2:
+                                    st.metric("Chunks Processed", chunk_count)
+                                
+                                if result.get("language"):
+                                    st.info(f"Language: {LANGUAGES.get(result['language'], result['language'])}")
+                                break
+                            else:
+                                chunk_count += 1
+                                progress = min(chunk_count * 0.1, 0.9)  # Estimate progress
+                                progress_bar.progress(progress)
+                                
+                                status_text.text(f"Processing chunk {chunk_count}... ({result.get('chunk_start', 0):.1f}s)")
+                                
+                                if result.get("text"):
+                                    # Show current chunk
+                                    result_container.info(f"**Chunk {chunk_count}:** {result['text']}")
+                                    
+                                    # Show accumulated text
+                                    if result.get("full_text"):
+                                        full_text_container.success(f"**Full Text:** {result['full_text']}")
+                                
+                                time.sleep(0.05)  # Small delay for better UX
                         
-                except Exception as e:
-                    st.error(f"Transcription failed: {e}")
-                    
-                os.unlink(tmp.name)
+                        if chunk_count == 0:
+                            st.warning("No speech detected in the audio file")
+                            
+                    except Exception as e:
+                        st.error(f"Transcription failed: {e}")
+                        
+            finally:
+                # Safe file cleanup
+                try:
+                    if os.path.exists(tmp.name):
+                        os.unlink(tmp.name)
+                except Exception as cleanup_error:
+                    print(f"Cleanup warning: {cleanup_error}")
 
 elif method == "YouTube Link":
     st.subheader("YouTube Transcription")
@@ -441,94 +634,93 @@ elif method == "YouTube Link":
                 except Exception as e:
                     st.error(f"Transcription failed: {e}")
                 
-                os.unlink(audio_file)
+                # Safe file cleanup
+                try:
+                    if os.path.exists(audio_file):
+                        os.unlink(audio_file)
+                except Exception as cleanup_error:
+                    print(f"Cleanup warning: {cleanup_error}")
 
-elif method == "Microphone":
-    st.subheader("Record Audio")
+elif method == "Microphone (Real-time)":
+    st.subheader("Real-time Speech Transcription")
     
-    duration = st.slider("Duration (seconds):", 5, 60, 10)
+    col1, col2 = st.columns(2)
     
-    if st.button("Start Recording"):
-        st.subheader("Live Recording & Transcription")
+    with col1:
+        if not st.session_state.recording:
+            if st.button("🔴 Start Recording", type="primary", use_container_width=True):
+                st.session_state.recorder = RealTimeRecorder(st.session_state.engine, language)
+                st.session_state.recorder.start_recording()
+                st.session_state.recording = True
+                st.rerun()
+        else:
+            if st.button("⏹️ Stop Recording", type="secondary", use_container_width=True):
+                if st.session_state.recorder:
+                    st.session_state.recorder.stop_recording()
+                st.session_state.recording = False
+                st.rerun()
+    
+    with col2:
+        if st.session_state.recording:
+            st.success("🎤 Recording... Speak now!")
+        else:
+            st.info("Ready to record")
+    
+    # Show real-time results
+    if st.session_state.recording and st.session_state.recorder:
+        st.subheader("Live Transcription")
         
-        # Create placeholders for streaming results
-        progress = st.progress(0)
-        status = st.empty()
-        current_text = st.empty()
-        accumulated_text = st.empty()
+        # Placeholders for results
+        status_container = st.empty()
+        current_chunk_container = st.empty()
+        full_text_container = st.empty()
         
-        audio_data = []
-        chunk_size = int(5 * 16000)  # 5-second chunks for transcription
-        frames_per_chunk = int(chunk_size / 1024)
-        total_chunks = int(16000 / 1024 * duration)
-        transcribed_chunks = 0
-        full_transcription = ""
+        # Auto-refresh to get new results
+        placeholder = st.empty()
         
-        try:
-            audio = pyaudio.PyAudio()
-            stream = audio.open(
-                format=pyaudio.paInt16,
-                channels=1,
-                rate=16000,
-                input=True,
-                frames_per_buffer=1024
-            )
+        while st.session_state.recording:
+            results = st.session_state.recorder.get_results()
             
-            for i in range(total_chunks):
-                chunk = stream.read(1024)
-                audio_data.append(np.frombuffer(chunk, dtype=np.int16))
-                
-                progress.progress((i + 1) / total_chunks)
-                remaining = duration * (1 - (i + 1) / total_chunks)
-                status.text(f"Recording... {remaining:.1f}s left")
-                
-                # Process chunks every 5 seconds
-                if len(audio_data) >= frames_per_chunk or i == total_chunks - 1:
-                    if len(audio_data) > 0:
-                        try:
-                            # Create temporary audio file for this chunk
-                            chunk_audio = np.concatenate(audio_data)
-                            
-                            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-                                sf.write(tmp.name, chunk_audio.astype(np.float32) / 32768.0, 16000)
-                                
-                                transcribed_chunks += 1
-                                current_text.info(f"Processing chunk {transcribed_chunks}...")
-                                
-                                # Quick transcription of current chunk
-                                result = st.session_state.engine.transcribe(tmp.name, language)
-                                
-                                if result["text"]:
-                                    chunk_text = result["text"].strip()
-                                    full_transcription += " " + chunk_text
-                                    
-                                    current_text.success(f"**Chunk {transcribed_chunks}:** {chunk_text}")
-                                    accumulated_text.info(f"**Full Text:** {full_transcription.strip()}")
-                                else:
-                                    current_text.warning(f"Chunk {transcribed_chunks}: (no speech)")
-                                
-                                os.unlink(tmp.name)
-                                
-                        except Exception as chunk_error:
-                            current_text.error(f"Chunk processing error: {chunk_error}")
-                        
-                        # Reset for next chunk (keep some overlap)
-                        overlap = int(len(audio_data) * 0.2)  # 20% overlap
-                        audio_data = audio_data[-overlap:] if overlap > 0 else []
-            
-            stream.stop_stream()
-            stream.close()
-            audio.terminate()
-            
-            status.success("Recording Complete!")
-            
-            if not full_transcription.strip():
-                st.warning("No speech detected during recording")
-            else:
-                st.success(f"**Final Transcription:** {full_transcription.strip()}")
+            for result in results:
+                if result.get("error"):
+                    st.error(result["error"])
+                elif result.get("is_final"):
+                    status_container.success("Recording Complete!")
+                    if result.get("full_text"):
+                        full_text_container.success(f"**Final Transcription:** {result['full_text']}")
+                    if result.get("total_chunks"):
+                        st.info(f"Processed {result['total_chunks']} audio chunks")
+                    break
+                else:
+                    # Live results
+                    chunk_num = result.get("chunk", 0)
+                    status_container.info(f"Processing chunk {chunk_num}...")
                     
-        except Exception as e:
-            st.error(f"Recording failed: {e}")
+                    if result.get("text") and result["text"] != "(no speech)":
+                        current_chunk_container.info(f"**Chunk {chunk_num}:** {result['text']}")
+                        
+                        if result.get("full_text"):
+                            full_text_container.success(f"**Live Transcription:** {result['full_text']}")
+                    else:
+                        current_chunk_container.warning(f"Chunk {chunk_num}: (no speech detected)")
+            
+            # Sleep briefly before checking again
+            time.sleep(0.5)
+            
+            # Check if recording stopped
+            if not st.session_state.recording:
+                break
+    
+    elif not st.session_state.recording and 'recorder' in st.session_state and st.session_state.recorder:
+        # Show any remaining results after stopping
+        st.subheader("Final Results")
+        results = st.session_state.recorder.get_results()
+        
+        for result in results:
+            if result.get("is_final") and result.get("full_text"):
+                st.success(f"**Complete Transcription:** {result['full_text']}")
+                if result.get("total_chunks"):
+                    st.info(f"Total chunks processed: {result['total_chunks']}")
 
 st.markdown("---")
 st.markdown("**Simple Speech Transcription** | VAD + ASR") 
