@@ -39,6 +39,22 @@ class ASRConfig:
     vad_filter: bool = True  # Enable VAD filtering in Whisper
 
 @dataclass
+class VADConfig:
+    """Voice Activity Detection configuration"""
+    model: str = "pyannote"
+    threshold: float = 0.5
+    min_speech_duration: float = 0.25
+    min_silence_duration: float = 0.1
+    speech_pad_ms: int = 30
+    window_size: int = 512
+    sample_rate: int = 16000
+    chunk_size: int = 1024
+    aggressiveness: int = 2
+    frame_duration_ms: int = 30
+    speech_pad_start: float = 0.1
+    speech_pad_end: float = 0.3
+
+@dataclass
 class DevelopmentConfig:
     """Development and testing configuration"""
     save_intermediate_outputs: bool = True
@@ -51,6 +67,7 @@ class Config:
     """Main configuration class containing all sub-configurations"""
     system: SystemConfig = field(default_factory=SystemConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
+    vad: VADConfig = field(default_factory=VADConfig)
     asr: ASRConfig = field(default_factory=ASRConfig)
     development: DevelopmentConfig = field(default_factory=DevelopmentConfig)
 
@@ -130,6 +147,7 @@ class ConfigLoader:
         # Create sub-configs
         system_config = SystemConfig(**config_dict.get('system', {}))
         audio_config = AudioConfig(**config_dict.get('audio', {}))
+        vad_config = VADConfig(**config_dict.get('vad', {}))
         asr_config = ASRConfig(**config_dict.get('asr', {}))
         development_config = DevelopmentConfig(**config_dict.get('development', {}))
         
@@ -173,5 +191,5 @@ def reload_config() -> Config:
 __all__ = [
     'Config', 'ConfigLoader', 'get_config', 'reload_config',
     'SystemConfig', 'AudioConfig', 'ASRConfig', 
-    'DevelopmentConfig'
+    'DevelopmentConfig', 'VADConfig'
 ] 
