@@ -1,6 +1,7 @@
 import time
 import numpy as np
-import librosa
+import soundfile as sf
+import scipy.signal
 from typing import Union, Iterator, Optional, List
 from pathlib import Path
 
@@ -10,6 +11,31 @@ except ImportError:
     raise ImportError("faster-whisper is required. Install with: pip install faster-whisper")
 
 from .asr_engine import ASREngine, ASRResult, ASRSegment, calculate_audio_duration
+
+def load_audio_soundfile(audio_path: str, target_sr: int = 16000) -> tuple[np.ndarray, int]:
+    """
+    Load audio file using soundfile and resample if needed.
+    Replacement for librosa.load() to avoid LLVM errors.
+    """
+    # Load audio file
+    audio_data, original_sr = sf.read(audio_path)
+    
+    # Convert to mono if stereo
+    if len(audio_data.shape) > 1:
+        audio_data = np.mean(audio_data, axis=1)
+    
+    # Resample if needed
+    if original_sr != target_sr:
+        # Calculate resampling ratio
+        resample_ratio = target_sr / original_sr
+        
+        # Resample using scipy
+        audio_data = scipy.signal.resample(
+            audio_data, 
+            int(len(audio_data) * resample_ratio)
+        ).astype(np.float32)
+    
+    return audio_data, target_sr
 
 # Handle config import with fallback
 try:
@@ -133,8 +159,8 @@ class WhisperCT2Model(ASREngine):
             if not audio_path.exists():
                 raise FileNotFoundError(f"Audio file not found: {audio}")
             
-            # Load with librosa for consistency
-            audio_data, sr = librosa.load(audio, sr=16000)
+            # Load with soundfile (avoiding librosa LLVM errors)
+            audio_data, sr = load_audio_soundfile(audio, target_sr=16000)
             audio_duration = len(audio_data) / 16000
         elif isinstance(audio, np.ndarray):
             audio_data = audio
@@ -290,7 +316,7 @@ class WhisperCT2Model(ASREngine):
             ASRResult for each chunk
         """
         # Load audio file
-        audio_data, sr = librosa.load(audio_file, sr=16000)
+        audio_data, sr = load_audio_soundfile(audio_file, target_sr=16000)
         total_duration = len(audio_data) / 16000
         
         chunk_samples = int(chunk_duration * 16000)
