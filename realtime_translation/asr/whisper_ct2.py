@@ -35,6 +35,9 @@ def load_audio_soundfile(audio_path: str, target_sr: int = 16000) -> tuple[np.nd
             int(len(audio_data) * resample_ratio)
         ).astype(np.float32)
     
+    # CRITICAL: Always ensure float32 format for ONNX compatibility
+    audio_data = audio_data.astype(np.float32)
+    
     return audio_data, target_sr
 
 # Handle config import with fallback
@@ -77,6 +80,7 @@ class WhisperCT2Model(ASREngine):
         self.model = None
         self.device = self._get_device()
         self.compute_type = self._get_compute_type()
+        self._language_mapping_logged = False  
         
     def _get_device(self) -> str:
         """Determine the best device for model execution"""
@@ -163,7 +167,8 @@ class WhisperCT2Model(ASREngine):
             audio_data, sr = load_audio_soundfile(audio, target_sr=16000)
             audio_duration = len(audio_data) / 16000
         elif isinstance(audio, np.ndarray):
-            audio_data = audio
+            # CRITICAL: Ensure float32 format for ONNX compatibility
+            audio_data = audio.astype(np.float32)
             audio_duration = calculate_audio_duration(audio_data, 16000)
         else:
             raise ValueError("Audio input must be numpy array or file path")
@@ -172,7 +177,9 @@ class WhisperCT2Model(ASREngine):
         whisper_language = None
         if self.language and self.language != 'auto':
             whisper_language = map_language_to_iso(self.language)
-            print(f"Language mapping: '{self.language}' -> '{whisper_language}' for Whisper")
+            if not self._language_mapping_logged:
+                print(f"Language mapping: '{self.language}' -> '{whisper_language}' for Whisper")
+                self._language_mapping_logged = True
         
         # Transcription parameters - ACCURACY OPTIMIZED
         transcribe_params = {
