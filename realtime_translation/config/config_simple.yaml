@@ -15,7 +15,18 @@ audio:
   overlap_duration: 0.2
   format: "wav"
 
-
+vad:
+  model: "pyannote"
+  threshold: 0.5
+  min_speech_duration: 0.25
+  min_silence_duration: 0.1
+  speech_pad_ms: 30
+  window_size: 512
+  sample_rate: 16000
+  chunk_size: 1024
+  aggressiveness: 2
+  frame_duration_ms: 30
+  
 # Automatic Speech Recognition 
 asr:
   model: "tiny"  # Use tiny model for fast testing
