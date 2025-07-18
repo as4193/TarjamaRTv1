@@ -42,7 +42,21 @@ asr:
   chunk_length: 30
   stride_length: 5
 
-
+# Machine Translation
+mt:
+  model: "Helsinki-NLP/opus-mt-ar-en"
+  source_language: "arabic"
+  target_language: "english"
+  max_length: 128
+  local_files_only: true
+  beam_size: 4
+  temperature: 0.0
+  min_confidence: 0.3
+  retry_threshold: 0.5
+  wait_k:
+    k: 3
+    adaptive_k: true
+    
 development:
   save_intermediate_outputs: true
   debug_mode: false
