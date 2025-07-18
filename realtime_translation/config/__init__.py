@@ -55,6 +55,36 @@ class VADConfig:
     speech_pad_end: float = 0.3
 
 @dataclass
+class WaitKConfig:
+    """Wait-k policy configuration"""
+    mode: str = "fixed"
+    k: int = 3              
+    k_value: int = 3        
+    max_k: int = 10
+    min_k: int = 1
+    adaptive_k: bool = True  
+
+@dataclass
+class MTConfig:
+    """Machine Translation configuration"""
+    dev_model: str = "Helsinki-NLP/opus-mt-ar-en"
+    prod_model: str = "facebook/seamless-mt-large"
+    model: str = "Helsinki-NLP/opus-mt-ar-en"
+    source_language: str = "arabic"  
+    target_language: str = "english"  
+    source_lang: str = "arabic"      
+    target_lang: str = "english"      
+    wait_k: WaitKConfig = field(default_factory=WaitKConfig)
+    max_length: int = 128
+    local_files_only: bool = True  # Use only local files
+    beam_size: int = 4           
+    num_beams: int = 1           
+    temperature: float = 0.0
+    do_sample: bool = False
+    min_confidence: float = 0.3
+    retry_threshold: float = 0.5
+
+@dataclass
 class DevelopmentConfig:
     """Development and testing configuration"""
     save_intermediate_outputs: bool = True
@@ -69,6 +99,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VADConfig = field(default_factory=VADConfig)
     asr: ASRConfig = field(default_factory=ASRConfig)
+    mt: MTConfig = field(default_factory=MTConfig)
     development: DevelopmentConfig = field(default_factory=DevelopmentConfig)
 
 
@@ -86,7 +117,7 @@ class ConfigLoader:
             "config/config.yaml",
             "config.yaml",
             os.path.join(os.path.dirname(__file__), "config_simple.yaml"),
-            os.path.join(os.path.dirname(__file__), "config.yaml"),
+            # os.path.join(os.path.dirname(__file__), "config.yaml"),
         ]
         
         for path in possible_paths:
@@ -149,12 +180,15 @@ class ConfigLoader:
         audio_config = AudioConfig(**config_dict.get('audio', {}))
         vad_config = VADConfig(**config_dict.get('vad', {}))
         asr_config = ASRConfig(**config_dict.get('asr', {}))
+        mt_config = MTConfig(**config_dict.get('mt', {}))
         development_config = DevelopmentConfig(**config_dict.get('development', {}))
         
         return Config(
             system=system_config,
             audio=audio_config,
+            vad=vad_config,
             asr=asr_config,
+            mt=mt_config,
             development=development_config,
         )
     
@@ -190,6 +224,6 @@ def reload_config() -> Config:
 # Export main classes and functions
 __all__ = [
     'Config', 'ConfigLoader', 'get_config', 'reload_config',
-    'SystemConfig', 'AudioConfig', 'ASRConfig', 
-    'DevelopmentConfig', 'VADConfig'
+    'SystemConfig', 'AudioConfig', 'ASRConfig','DevelopmentConfig',
+    'VADConfig', 'WaitKConfig', 'MTConfig'
 ] 
