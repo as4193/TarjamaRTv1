@@ -23,17 +23,18 @@ except ImportError as e:
     st.info("Run: pip install pyaudio soundfile pydub yt-dlp")
     st.stop()
 
-# Check ASR/VAD modules
+# Check ASR/VAD/MT modules
 try:
     from asr import create_whisper_asr
     from vad import create_pyannote_vad
+    from mt import create_helsinki_mt
 except ImportError as e:
-    st.error(f"ASR/VAD modules not found: {e}")
+    st.error(f"ASR/VAD/MT modules not found: {e}")
     st.info("Make sure you're in the realtime_translation directory")
     st.stop()
 
 st.set_page_config(
-    page_title="Simple Speech Transcription",
+    page_title="Speech Transcription & Translation",
     page_icon="🗣️",
     layout="wide"
 )
@@ -57,10 +58,18 @@ LANGUAGES = {
     "nl": "Dutch"
 }
 
+# Translation target languages
+TARGET_LANGUAGES = {
+    "en": "English",
+    "ar": "Arabic"
+}
+
 class TranscriptionEngine:
     def __init__(self):
         self.vad_engine = None
         self.asr_engine = None
+        self.mt_engine_ar_en = None  # Arabic to English
+        self.mt_engine_en_ar = None  # English to Arabic
         self.loaded = False
         
     def load_models(self):
@@ -74,6 +83,17 @@ class TranscriptionEngine:
             self.asr_engine = create_whisper_asr()
             if self.asr_engine:
                 self.asr_engine.load_model()
+            
+            st.info("Loading MT models...")
+            # Load Arabic to English model
+            self.mt_engine_ar_en = create_helsinki_mt("Helsinki-NLP/opus-mt-ar-en")
+            if self.mt_engine_ar_en:
+                self.mt_engine_ar_en.load_model()
+            
+            # Load English to Arabic model
+            self.mt_engine_en_ar = create_helsinki_mt("Helsinki-NLP/opus-mt-en-ar")
+            if self.mt_engine_en_ar:
+                self.mt_engine_en_ar.load_model()
                 
             self.loaded = True
             st.success("Models loaded!")
@@ -156,14 +176,55 @@ class TranscriptionEngine:
                 raise RuntimeError(f"LLVM Error: {e}")
             else:
                 raise e
+    
+    def translate(self, text, target_language="en"):
+        """Translate text to target language"""
+        if not self.loaded:
+            raise RuntimeError("Models not loaded")
+        
+        if not text.strip():
+            return {"translated_text": "", "processing_time": 0.0, "confidence": 0.0}
+        
+        start_time = time.time()
+        
+        try:
+            # Select appropriate MT engine based on target language
+            if target_language == "en":
+                # Translate to English (Arabic → English)
+                mt_engine = self.mt_engine_ar_en
+            elif target_language == "ar":
+                # Translate to Arabic (English → Arabic)
+                mt_engine = self.mt_engine_en_ar
+            else:
+                # Default to Arabic → English
+                mt_engine = self.mt_engine_ar_en
+            
+            if mt_engine:
+                result = mt_engine.translate(text)
+                return {
+                    "translated_text": result.translated_text,
+                    "processing_time": time.time() - start_time,
+                    "confidence": result.confidence or 0.0,
+                    "source_language": result.source_language,
+                    "target_language": result.target_language
+                }
+            else:
+                return {"translated_text": text, "processing_time": 0.0, "confidence": 0.0}
+                
+        except Exception as e:
+            st.error(f"Translation failed: {e}")
+            return {"translated_text": text, "processing_time": 0.0, "confidence": 0.0}
 
 class RealTimeRecorder:
-    def __init__(self, engine, language="auto"):
+    def __init__(self, engine, language="auto", enable_translation=False, target_language="en"):
         self.engine = engine
         self.language = language
+        self.enable_translation = enable_translation
+        self.target_language = target_language
         self.recording = False
         self.audio_queue = queue.Queue()
         self.result_queue = queue.Queue()
+        self.translation_queue = queue.Queue()  # New queue for translation tasks
         self.audio_stream = None
         self.audio_obj = None
         
@@ -175,6 +236,7 @@ class RealTimeRecorder:
         self.recording = True
         self.audio_queue = queue.Queue()
         self.result_queue = queue.Queue()
+        self.translation_queue = queue.Queue()
         
         # Start audio recording thread
         self.recording_thread = threading.Thread(target=self._recording_worker)
@@ -185,6 +247,12 @@ class RealTimeRecorder:
         self.transcription_thread = threading.Thread(target=self._transcription_worker)
         self.transcription_thread.daemon = True
         self.transcription_thread.start()
+        
+        # Start translation thread if enabled
+        if self.enable_translation:
+            self.translation_thread = threading.Thread(target=self._translation_worker)
+            self.translation_thread.daemon = True
+            self.translation_thread.start()
     
     def stop_recording(self):
         """Stop recording and transcription"""
@@ -250,6 +318,7 @@ class RealTimeRecorder:
         """Worker thread for transcription"""
         chunk_count = 0
         full_transcription = ""
+        full_translation = ""
         
         while self.recording or not self.audio_queue.empty():
             try:
@@ -296,13 +365,28 @@ class RealTimeRecorder:
                             chunk_text = result.get_full_text().strip()
                             full_transcription += " " + chunk_text
                             
-                            self.result_queue.put({
+                            # Prepare result with transcription
+                            result_data = {
                                 "chunk": chunk_count,
                                 "text": chunk_text,
                                 "full_text": full_transcription.strip(),
                                 "language": result.language,
-                                "is_final": False
-                            })
+                                "is_final": False,
+                                "type": "transcription"
+                            }
+                            
+                            # Send to translation queue if enabled (non-blocking)
+                            if self.enable_translation and chunk_text:
+                                try:
+                                    self.translation_queue.put({
+                                        "chunk": chunk_count,
+                                        "text": chunk_text,
+                                        "full_text": full_transcription.strip()
+                                    })
+                                except:
+                                    pass  # Don't block ASR if translation queue is full
+                            
+                            self.result_queue.put(result_data)
                         else:
                             # Debug info for first few chunks
                             debug_msg = "(no speech)"
@@ -327,11 +411,91 @@ class RealTimeRecorder:
                 self.result_queue.put({"error": f"Transcription error: {e}"})
         
         # Final result
-        self.result_queue.put({
+        final_result = {
             "is_final": True, 
             "full_text": full_transcription.strip(),
-            "total_chunks": chunk_count
-        })
+            "total_chunks": chunk_count,
+            "type": "transcription"
+        }
+        
+        # Send final text to translation queue if enabled
+        if self.enable_translation and full_transcription.strip():
+            try:
+                self.translation_queue.put({
+                    "chunk": -1,  # Final chunk indicator
+                    "text": full_transcription.strip(),
+                    "full_text": full_transcription.strip(),
+                    "is_final": True
+                })
+            except:
+                pass
+        
+        self.result_queue.put(final_result)
+    
+    def _translation_worker(self):
+        """Worker thread for translation (independent of ASR)"""
+        full_translation = ""
+        
+        while self.recording or not self.translation_queue.empty():
+            try:
+                # Get translation task with timeout
+                try:
+                    task = self.translation_queue.get(timeout=1.0)
+                except queue.Empty:
+                    continue
+                
+                chunk_num = task["chunk"]
+                text = task["text"]
+                is_final = task.get("is_final", False)
+                
+                if not text.strip():
+                    continue
+                
+                try:
+                    # Translate the text
+                    translation_result = self.engine.translate(text, self.target_language)
+                    
+                    if translation_result["translated_text"]:
+                        if chunk_num != -1:  # Regular chunk
+                            full_translation += " " + translation_result["translated_text"]
+                        else:  # Final chunk
+                            full_translation = translation_result["translated_text"]
+                        
+                        # Prepare translation result
+                        result_data = {
+                            "chunk": chunk_num,
+                            "translated_text": translation_result["translated_text"],
+                            "full_translation": full_translation.strip(),
+                            "translation_confidence": translation_result["confidence"],
+                            "is_final": is_final,
+                            "type": "translation"
+                        }
+                        
+                        self.result_queue.put(result_data)
+                    
+                except Exception as e:
+                    # Translation failed for this chunk
+                    result_data = {
+                        "chunk": chunk_num,
+                        "translated_text": "",
+                        "full_translation": full_translation.strip(),
+                        "translation_confidence": 0.0,
+                        "is_final": is_final,
+                        "type": "translation",
+                        "error": str(e)
+                    }
+                    self.result_queue.put(result_data)
+                
+            except Exception as e:
+                self.result_queue.put({"error": f"Translation error: {e}", "type": "translation"})
+        
+        # Final translation result
+        if full_translation.strip():
+            self.result_queue.put({
+                "final_translation": full_translation.strip(),
+                "is_final": True,
+                "type": "translation"
+            })
     
     def get_results(self):
         """Get transcription results (non-blocking)"""
@@ -458,16 +622,26 @@ if 'recorder' not in st.session_state:
     st.session_state.recording = False
 
 # UI
-st.title("🎤 Simple Speech Transcription")
+st.title("🎤 Speech Transcription & Translation")
 
 # Sidebar
 with st.sidebar:
     st.header("Settings")
     
     language = st.selectbox(
-        "Language",
+        "Input Language",
         options=list(LANGUAGES.keys()),
         format_func=lambda x: LANGUAGES[x]
+    )
+    
+    st.subheader("Translation")
+    enable_translation = st.checkbox("Enable Translation", value=False)
+    
+    target_language = st.selectbox(
+        "Target Language",
+        options=list(TARGET_LANGUAGES.keys()),
+        format_func=lambda x: TARGET_LANGUAGES[x],
+        disabled=not enable_translation
     )
     
     st.subheader("Models")
@@ -496,20 +670,38 @@ if method == "Audio File":
                 if convert_audio(file, tmp.name):
                     st.subheader("Transcription Results")
                     
-                    # Create placeholders for streaming results
+                    # Placeholders for streaming results
                     progress_bar = st.progress(0)
                     status_text = st.empty()
-                    result_container = st.empty()
-                    full_text_container = st.empty()
+                    
+                    # Side-by-Side columns for transcription and translation
+                    if enable_translation:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.subheader("Transcription")
+                            result_container = st.empty()
+                            full_text_container = st.empty()
+                        with col2:
+                            st.subheader(f"Translation ({TARGET_LANGUAGES[target_language]})")
+                            translation_container = st.empty()
+                            full_translation_container = st.empty()
+                    else:
+                        result_container = st.empty()
+                        full_text_container = st.empty()
+                        translation_container = None
+                        full_translation_container = None
                     
                     start_time = time.time()
                     chunk_count = 0
+                    full_translation = ""
                     
                     try:
+                        final_transcription = ""
                         for result in st.session_state.engine.transcribe_streaming(tmp.name, language):
                             if result.get("is_final"):
                                 progress_bar.progress(1.0)
-                                status_text.success("Transcription Complete!")
+                                status_text.success("Processing Complete!")
+                                final_transcription = result.get("full_text", "")
                                 
                                 # Show final stats
                                 processing_time = time.time() - start_time
@@ -536,8 +728,19 @@ if method == "Audio File":
                                     # Show accumulated text
                                     if result.get("full_text"):
                                         full_text_container.success(f"**Full Text:** {result['full_text']}")
+                                    
+                                    # Translate each chunk in parallel if enabled
+                                    if enable_translation and translation_container and full_translation_container:
+                                        try:
+                                            translation_result = st.session_state.engine.translate(result['text'], target_language)
+                                            if translation_result["translated_text"]:
+                                                translation_container.info(f"**Chunk {chunk_count}:** {translation_result['translated_text']}")
+                                                full_translation += " " + translation_result['translated_text']
+                                                full_translation_container.success(f"**Full Translation:** {full_translation.strip()}")
+                                        except Exception as e:
+                                            translation_container.warning(f"Translation failed for chunk {chunk_count}")
                                 
-                                time.sleep(0.05)  # Small delay for better UX
+                                time.sleep(0.05) 
                         
                         if chunk_count == 0:
                             st.warning("No speech detected in the audio file")
@@ -585,20 +788,38 @@ elif method == "YouTube Link":
                 st.success("Downloaded successfully!")
                 st.subheader("Transcription Results")
                 
-                # Create placeholders for streaming results
+                # Placeholders for streaming results
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                result_container = st.empty()
-                full_text_container = st.empty()
+                
+                # Side-by-Side columns for transcription and translation
+                if enable_translation:
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.subheader("Transcription")
+                        result_container = st.empty()
+                        full_text_container = st.empty()
+                    with col2:
+                        st.subheader(f"Translation ({TARGET_LANGUAGES[target_language]})")
+                        translation_container = st.empty()
+                        full_translation_container = st.empty()
+                else:
+                    result_container = st.empty()
+                    full_text_container = st.empty()
+                    translation_container = None
+                    full_translation_container = None
                 
                 start_time = time.time()
                 chunk_count = 0
+                full_translation = ""
                 
                 try:
+                    final_transcription = ""
                     for result in st.session_state.engine.transcribe_streaming(audio_file, language):
                         if result.get("is_final"):
                             progress_bar.progress(1.0)
-                            status_text.success("Transcription Complete!")
+                            status_text.success("Processing Complete!")
+                            final_transcription = result.get("full_text", "")
                             
                             # Show final stats
                             processing_time = time.time() - start_time
@@ -625,8 +846,19 @@ elif method == "YouTube Link":
                                 # Show accumulated text
                                 if result.get("full_text"):
                                     full_text_container.success(f"**Full Text:** {result['full_text']}")
+                                
+                                # Translate each chunk in parallel if enabled
+                                if enable_translation and translation_container and full_translation_container:
+                                    try:
+                                        translation_result = st.session_state.engine.translate(result['text'], target_language)
+                                        if translation_result["translated_text"]:
+                                            translation_container.info(f"**Chunk {chunk_count}:** {translation_result['translated_text']}")
+                                            full_translation += " " + translation_result['translated_text']
+                                            full_translation_container.success(f"**Full Translation:** {full_translation.strip()}")
+                                    except Exception as e:
+                                        translation_container.warning(f"Translation failed for chunk {chunk_count}")
                             
-                            time.sleep(0.05)  # Small delay for better UX
+                            time.sleep(0.05) 
                     
                     if chunk_count == 0:
                         st.warning("No speech detected in the YouTube video")
@@ -649,7 +881,12 @@ elif method == "Microphone (Real-time)":
     with col1:
         if not st.session_state.recording:
             if st.button("🔴 Start Recording", type="primary", use_container_width=True):
-                st.session_state.recorder = RealTimeRecorder(st.session_state.engine, language)
+                st.session_state.recorder = RealTimeRecorder(
+                    st.session_state.engine, 
+                    language, 
+                    enable_translation, 
+                    target_language
+                )
                 st.session_state.recorder.start_recording()
                 st.session_state.recording = True
                 st.rerun()
@@ -666,17 +903,27 @@ elif method == "Microphone (Real-time)":
         else:
             st.info("Ready to record")
     
-    # Show real-time results
+    # Real-Time results
     if st.session_state.recording and st.session_state.recorder:
-        st.subheader("Live Transcription")
-        
-        # Placeholders for results
-        status_container = st.empty()
-        current_chunk_container = st.empty()
-        full_text_container = st.empty()
-        
-        # Auto-refresh to get new results
-        placeholder = st.empty()
+        # Side-by-Side columns for transcription and translation
+        if enable_translation:
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("Live Transcription")
+                status_container = st.empty()
+                current_chunk_container = st.empty()
+                full_text_container = st.empty()
+            with col2:
+                st.subheader(f"Live Translation ({TARGET_LANGUAGES[target_language]})")
+                current_translation_container = st.empty()
+                full_translation_container = st.empty()
+        else:
+            st.subheader("Live Transcription")
+            status_container = st.empty()
+            current_chunk_container = st.empty()
+            full_text_container = st.empty()
+            current_translation_container = None
+            full_translation_container = None
         
         while st.session_state.recording:
             results = st.session_state.recorder.get_results()
@@ -685,26 +932,41 @@ elif method == "Microphone (Real-time)":
                 if result.get("error"):
                     st.error(result["error"])
                 elif result.get("is_final"):
-                    status_container.success("Recording Complete!")
-                    if result.get("full_text"):
-                        full_text_container.success(f"**Final Transcription:** {result['full_text']}")
-                    if result.get("total_chunks"):
-                        st.info(f"Processed {result['total_chunks']} audio chunks")
-                    break
+                    result_type = result.get("type", "transcription")
+                    
+                    if result_type == "transcription":
+                        status_container.success("Recording Complete!")
+                        if result.get("full_text"):
+                            full_text_container.success(f"**Final Transcription:** {result['full_text']}")
+                        if result.get("total_chunks"):
+                            st.info(f"Processed {result['total_chunks']} audio chunks")
+                    elif result_type == "translation" and enable_translation and full_translation_container:
+                        if result.get("final_translation"):
+                            full_translation_container.success(f"**Final Translation ({TARGET_LANGUAGES[target_language]}):** {result['final_translation']}")
                 else:
                     # Live results
+                    result_type = result.get("type", "transcription")
                     chunk_num = result.get("chunk", 0)
-                    status_container.info(f"Processing chunk {chunk_num}...")
                     
-                    if result.get("text") and result["text"] != "(no speech)":
-                        current_chunk_container.info(f"**Chunk {chunk_num}:** {result['text']}")
+                    if result_type == "transcription":
+                        status_container.info(f"Processing chunk {chunk_num}...")
                         
-                        if result.get("full_text"):
-                            full_text_container.success(f"**Live Transcription:** {result['full_text']}")
-                    else:
-                        current_chunk_container.warning(f"Chunk {chunk_num}: (no speech detected)")
+                        if result.get("text") and result["text"] != "(no speech)":
+                            current_chunk_container.info(f"**Chunk {chunk_num}:** {result['text']}")
+                            
+                            if result.get("full_text"):
+                                full_text_container.success(f"**Live Transcription:** {result['full_text']}")
+                        else:
+                            current_chunk_container.warning(f"Chunk {chunk_num}: (no speech detected)")
+                    
+                    elif result_type == "translation" and enable_translation:
+                        if result.get("translated_text") and current_translation_container:
+                            current_translation_container.info(f"**Translation {chunk_num}:** {result['translated_text']}")
+                            
+                            # Show accumulated translation
+                            if result.get("full_translation") and full_translation_container:
+                                full_translation_container.success(f"**Full Translation:** {result['full_translation']}")
             
-            # Sleep briefly before checking again
             time.sleep(0.5)
             
             # Check if recording stopped
@@ -718,9 +980,18 @@ elif method == "Microphone (Real-time)":
         
         for result in results:
             if result.get("is_final") and result.get("full_text"):
-                st.success(f"**Complete Transcription:** {result['full_text']}")
+                if enable_translation and result.get("final_translation"):
+                    # Show side-by-side final results
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.success(f"**Complete Transcription:** {result['full_text']}")
+                    with col2:
+                        st.success(f"**Complete Translation ({TARGET_LANGUAGES[target_language]}):** {result['final_translation']}")
+                else:
+                    st.success(f"**Complete Transcription:** {result['full_text']}")
+                    
                 if result.get("total_chunks"):
                     st.info(f"Total chunks processed: {result['total_chunks']}")
 
 st.markdown("---")
-st.markdown("**Simple Speech Transcription** | VAD + ASR") 
+st.markdown("**Speech Transcription & Translation** | VAD + ASR + MT") 
