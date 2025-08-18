@@ -1,9 +1,17 @@
+import os
 import time
+import logging
 import numpy as np
-import soundfile as sf
-import scipy.signal
-from typing import Union, Iterator, Optional, List
 from pathlib import Path
+from typing import Iterator, Optional, Union
+
+logger = logging.getLogger(__name__)
+
+try:
+    import soundfile as sf
+    import scipy.signal
+except ImportError:
+    raise ImportError("soundfile and scipy are required. Install with: pip install soundfile scipy")
 
 try:
     from faster_whisper import WhisperModel
@@ -11,163 +19,119 @@ except ImportError:
     raise ImportError("faster-whisper is required. Install with: pip install faster-whisper")
 
 from .asr_engine import ASREngine, ASRResult, ASRSegment, calculate_audio_duration
+from .language_mapping import map_language_to_iso, map_language_to_full
+
+# Handle config import - try relative import first, then absolute
+try:
+    from ..config import get_config
+except ImportError:
+    try:
+        from config import get_config
+    except ImportError:
+        import sys
+        sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 
 def load_audio_soundfile(audio_path: str, target_sr: int = 16000) -> tuple[np.ndarray, int]:
-    """
-    Load audio file using soundfile and resample if needed.
-    Replacement for librosa.load() to avoid LLVM errors.
-    """
-    # Load audio file
-    audio_data, original_sr = sf.read(audio_path)
+    """Load audio file using soundfile with pydub fallback for unsupported formats"""
+    try:
+        audio_data, original_sr = sf.read(audio_path)
+    except Exception as e:
+        print(f"Soundfile failed for {audio_path}, using pydub fallback: {e}")
+        
+        try:
+            from pydub import AudioSegment
+            
+            audio = AudioSegment.from_file(audio_path)
+            
+            if audio.channels > 1:
+                audio = audio.set_channels(1)
+            
+            original_sr = audio.frame_rate
+            audio_data = np.array(audio.get_array_of_samples(), dtype=np.float32)
+            audio_data = audio_data / (2**15)
+            
+        except ImportError:
+            raise ImportError("pydub is required for .m4a files. Install with: pip install pydub")
+        except Exception as pydub_error:
+            raise RuntimeError(f"Failed to load audio file {audio_path} with both soundfile and pydub: {pydub_error}")
     
-    # Convert to mono if stereo
+    # Convert to mono if stereo (for soundfile path)
     if len(audio_data.shape) > 1:
         audio_data = np.mean(audio_data, axis=1)
     
     # Resample if needed
     if original_sr != target_sr:
-        # Calculate resampling ratio
         resample_ratio = target_sr / original_sr
-        
-        # Resample using scipy
         audio_data = scipy.signal.resample(
             audio_data, 
             int(len(audio_data) * resample_ratio)
         ).astype(np.float32)
     
-    # CRITICAL: Always ensure float32 format for ONNX compatibility
     audio_data = audio_data.astype(np.float32)
-    
     return audio_data, target_sr
-
-# Handle config import with fallback
-try:
-    from ..config import get_config
-except ImportError:
-    # Fallback for when running as standalone module
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    try:
-        from config import get_config
-    except ImportError:
-        # Create a mock config for testing
-        def get_config():
-            return type('Config', (), {
-                'system': type('SystemConfig', (), {
-                    'device': 'auto',
-                    'max_workers': 4
-                })(),
-                'asr': type('ASRConfig', (), {
-                    'model': 'tiny',
-                    'language': 'arabic',  # Use full name
-                    'compute_type': 'auto',
-                    'beam_size': 1,
-                    'best_of': 1,
-                    'temperature': 0.0,
-                    'condition_on_previous_text': True,
-                    'chunk_length': 30,
-                    'stride_length': 5
-                })()
-            })()
 
 
 class WhisperCT2Model(ASREngine):
-    """Faster-whisper implementation for Arabic ASR with streaming support"""
+    """Faster-whisper implementation for ASR with streaming support"""
     
     def __init__(self, config=None):
         super().__init__(config)
         self.model = None
         self.device = self._get_device()
         self.compute_type = self._get_compute_type()
-        self._language_mapping_logged = False  
         
     def _get_device(self) -> str:
-        """Determine the best device for model execution"""
-        try:
-            system_config = get_config().system
-            if system_config.device == "auto":
-                import torch
-                return "cuda" if torch.cuda.is_available() else "cpu"
-            return system_config.device
-        except:
-            # Fallback
-            try:
-                import torch
-                return "cuda" if torch.cuda.is_available() else "cpu"
-            except:
-                return "cpu"
+        """Get GPU device for model execution"""
+        import torch
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is not available in PyTorch. GPU is required for this evaluation.")
+        return "cuda"
     
     def _get_compute_type(self) -> str:
-        """Determine the best compute type based on device and config"""
+        """Get compute type for GPU"""
         if self.config.compute_type != "auto":
             return self.config.compute_type
-        
-        if self.device == "cuda":
-            return "float16"  # Faster on GPU
-        else:
-            return "int8"     # More efficient on CPU
+        return "float16"
     
     def load_model(self) -> None:
-        """Load the faster-whisper model"""
+        """Load the Whisper model"""
         if self.is_loaded:
             return
-        
-        print(f"Loading Whisper model: {self.model_name}")
-        print(f"   Device: {self.device}, Compute type: {self.compute_type}")
-        
-        start_time = time.time()
-        
+            
         try:
-            # Get max workers with fallback
-            try:
-                max_workers = get_config().system.max_workers
-            except:
-                max_workers = 4
-                
+            print(f"Loading Whisper model: {self.config.model}")
+            print(f"Device: {self.device}")
+            print(f"Compute type: {self.compute_type}")
+            
             self.model = WhisperModel(
-                self.model_name,
+                self.config.model,
                 device=self.device,
                 compute_type=self.compute_type,
-                num_workers=max_workers
+                local_files_only=self.config.local_files_only
             )
-            
-            load_time = time.time() - start_time
-            print(f"Model loaded successfully in {load_time:.2f} seconds")
             self.is_loaded = True
+            print(f"✅ Model loaded successfully")
             
         except Exception as e:
-            print(f"Failed to load model: {e}")
+            print(f"❌ Failed to load model: {e}")
             raise
     
     def transcribe(self, audio: Union[np.ndarray, str], **kwargs) -> ASRResult:
-        """
-        Transcribe audio file or numpy array
-        
-        Args:
-            audio: Audio data (numpy array) or file path (string)
-            **kwargs: Additional transcription parameters
-            
-        Returns:
-            ASRResult with transcription and metadata
-        """
+        """Transcribe audio to text"""
         if not self.is_loaded:
             self.load_model()
         
         start_time = time.time()
         
-        # Handle different input types
         if isinstance(audio, str):
-            # Load audio file
             audio_path = Path(audio)
             if not audio_path.exists():
                 raise FileNotFoundError(f"Audio file not found: {audio}")
             
-            # Load with soundfile (avoiding librosa LLVM errors)
             audio_data, sr = load_audio_soundfile(audio, target_sr=16000)
             audio_duration = len(audio_data) / 16000
         elif isinstance(audio, np.ndarray):
-            # CRITICAL: Ensure float32 format for ONNX compatibility
             audio_data = audio.astype(np.float32)
             audio_duration = calculate_audio_duration(audio_data, 16000)
         else:
@@ -177,34 +141,27 @@ class WhisperCT2Model(ASREngine):
         whisper_language = None
         if self.language and self.language != 'auto':
             whisper_language = map_language_to_iso(self.language)
-            if not self._language_mapping_logged:
-                print(f"Language mapping: '{self.language}' -> '{whisper_language}' for Whisper")
-                self._language_mapping_logged = True
         
-        # Transcription parameters - ACCURACY OPTIMIZED
+        # Transcription parameters
         transcribe_params = {
             'beam_size': self.config.beam_size,
             'best_of': self.config.best_of,
             'temperature': self.config.temperature,
             'condition_on_previous_text': self.config.condition_on_previous_text,
-            'language': whisper_language,  # Use mapped ISO code
-            'word_timestamps': True,  # Enable word-level timestamps
-            'vad_filter': getattr(self.config, 'vad_filter', True),  # Enable VAD filtering
-            'repetition_penalty': getattr(self.config, 'repetition_penalty', 1.1),  # Reduce repetitions
-            'compression_ratio_threshold': 2.0,  # More strict to avoid repetition
-            'log_prob_threshold': -0.8,  # More strict for quality
-            'no_speech_threshold': 0.5,  # More strict speech detection
+            'language': whisper_language,
+            'word_timestamps': True,
+            'vad_filter': getattr(self.config, 'vad_filter', True),
+            'repetition_penalty': getattr(self.config, 'repetition_penalty', 1.1),
             **kwargs
         }
         
         try:
             # Perform transcription
             segments, info = self.model.transcribe(audio_data, **transcribe_params)
+            segment_list = list(segments)
             
-            # Convert to ASRSegments
             asr_segments = []
-            for segment in segments:
-                # Map detected language back to full name
+            for segment in segment_list:
                 detected_lang = info.language if hasattr(info, 'language') else whisper_language
                 full_lang = map_language_to_full(detected_lang) if detected_lang else self.language
                 
@@ -216,24 +173,21 @@ class WhisperCT2Model(ASREngine):
                     language=full_lang
                 )
                 
-                # Add word-level information if available
                 if hasattr(segment, 'words') and segment.words:
                     asr_segment.tokens = [word.word for word in segment.words]
                     asr_segment.token_timestamps = [word.start for word in segment.words]
                 
                 asr_segments.append(asr_segment)
             
+            confidences = [seg.confidence for seg in asr_segments if seg.confidence is not None]
+            overall_confidence = sum(confidences) / len(confidences) if confidences else None
+            
             processing_time = time.time() - start_time
             
-            # Map result language back to full name
-            result_detected_lang = info.language if hasattr(info, 'language') else whisper_language
-            result_full_lang = map_language_to_full(result_detected_lang) if result_detected_lang else self.language
-            
-            # Create result
             result = ASRResult(
                 segments=asr_segments,
-                language=result_full_lang,
-                confidence=info.language_probability if hasattr(info, 'language_probability') else None,
+                language=map_language_to_full(info.language) if hasattr(info, 'language') else self.language,
+                confidence=overall_confidence,
                 audio_duration=audio_duration,
                 processing_time=processing_time,
                 real_time_factor=processing_time / audio_duration if audio_duration > 0 else None,
@@ -247,16 +201,7 @@ class WhisperCT2Model(ASREngine):
             raise
     
     def transcribe_streaming(self, audio_chunks: Iterator[np.ndarray], **kwargs) -> Iterator[ASRResult]:
-        """
-        Transcribe audio in streaming mode
-        
-        Args:
-            audio_chunks: Iterator of audio chunks (16kHz numpy arrays)
-            **kwargs: Additional transcription parameters
-            
-        Yields:
-            ASRResult for each processed chunk
-        """
+        """Transcribe audio in streaming mode"""
         if not self.is_loaded:
             self.load_model()
         
@@ -265,8 +210,8 @@ class WhisperCT2Model(ASREngine):
         chunk_index = 0
         
         # Streaming parameters
-        chunk_length = self.config.chunk_length  # seconds
-        stride_length = self.config.stride_length  # seconds
+        chunk_length = self.config.chunk_length
+        stride_length = self.config.stride_length
         sample_rate = 16000
         
         chunk_samples = int(chunk_length * sample_rate)
@@ -274,16 +219,12 @@ class WhisperCT2Model(ASREngine):
         
         for audio_chunk in audio_chunks:
             chunk_index += 1
-            
-            # Add to buffer
             buffer = np.concatenate([buffer, audio_chunk])
             
             # Process if we have enough samples
             if len(buffer) >= chunk_samples:
-                # Extract chunk for processing
                 process_chunk = buffer[:chunk_samples]
                 
-                # Transcribe chunk
                 try:
                     result = self.transcribe(process_chunk, **kwargs)
                     
@@ -301,198 +242,49 @@ class WhisperCT2Model(ASREngine):
                     yield ASRResult(
                         segments=[],
                         model_name=self.model_name,
-                        audio_duration=calculate_audio_duration(process_chunk),
+                        audio_duration=calculate_audio_duration(process_chunk, 16000),
                         processing_time=0.0
                     )
                 
-                # Update buffer (keep overlap for context)
                 if len(buffer) > stride_samples:
                     buffer = buffer[stride_samples:]
                 else:
                     buffer = np.array([], dtype=np.float32)
     
-    def transcribe_file_chunked(self, audio_file: str, chunk_duration: float = 30.0) -> Iterator[ASRResult]:
-        """
-        Transcribe a long audio file in chunks
-        
-        Args:
-            audio_file: Path to audio file
-            chunk_duration: Duration of each chunk in seconds
-            
-        Yields:
-            ASRResult for each chunk
-        """
-        # Load audio file
-        audio_data, sr = load_audio_soundfile(audio_file, target_sr=16000)
-        total_duration = len(audio_data) / 16000
-        
-        chunk_samples = int(chunk_duration * 16000)
-        
-        print(f"Processing {audio_file} ({total_duration:.1f}s) in {chunk_duration}s chunks")
-        
-        for start_idx in range(0, len(audio_data), chunk_samples):
-            end_idx = min(start_idx + chunk_samples, len(audio_data))
-            chunk = audio_data[start_idx:end_idx]
-            
-            start_time = start_idx / 16000
-            
-            # Transcribe chunk
-            result = self.transcribe(chunk)
-            
-            # Adjust timestamps
-            for segment in result.segments:
-                segment.start += start_time
-                segment.end += start_time
-            
-            yield result
-    
-    def unload_model(self) -> None:
-        """Unload the model to free memory"""
-        if self.model is not None:
-            del self.model
-            self.model = None
-        
-        # Clear GPU memory if using CUDA
-        if self.device == "cuda":
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except ImportError:
-                pass
-        
-        self.is_loaded = False
-        print("Model unloaded successfully")
-    
     def get_model_info(self) -> dict:
-        """Get detailed model information"""
-        base_info = super().get_model_info()
-        base_info.update({
+        """Get information about the loaded model"""
+        return {
+            'model_name': self.model_name,
+            'language': self.language,
+            'is_loaded': self.is_loaded,
             'device': self.device,
             'compute_type': self.compute_type,
-            'chunk_length': self.config.chunk_length,
-            'stride_length': self.config.stride_length,
-            'beam_size': self.config.beam_size,
-            'temperature': self.config.temperature
-        })
-        return base_info
+            'config': self.config.__dict__ if hasattr(self.config, '__dict__') else str(self.config)
+        }
 
 
-def create_whisper_asr(model_name: Optional[str] = None) -> WhisperCT2Model:
-    """
-    Factory function to create a WhisperCT2Model instance
-    
-    Args:
-        model_name: Optional model name override
-        
-    Returns:
-        Configured WhisperCT2Model instance
-    """
-    try:
-        config = get_config().asr
-        
-        if model_name:
-            # Create a copy of config with different model name
-            import copy
-            config = copy.deepcopy(config)
-            config.model = model_name
-    except:
-        # Fallback config for testing
-        config = type('Config', (), {
-            'model': model_name or 'tiny',
-            'language': 'arabic',  # Use full name
-            'compute_type': 'auto',
-            'beam_size': 1,
-            'best_of': 1,
-            'temperature': 0.0,
-            'condition_on_previous_text': True,
-            'chunk_length': 30,
-            'stride_length': 5
-        })()
+def create_whisper_asr(model_size: str = "large-v3", config=None) -> WhisperCT2Model:
+    """Factory function to create a Whisper ASR engine"""
+    if config is None:
+        try:
+            config = get_config()
+            config = config.asr
+        except:
+            class MinimalConfig:
+                def __init__(self, model_size):
+                    self.model = f"./local_models/faster-whisper-{model_size}-ct2"
+                    self.language = "auto"
+                    self.compute_type = "float16"
+                    self.local_files_only = True
+                    self.beam_size = 5
+                    self.best_of = 3
+                    self.temperature = 0.0
+                    self.condition_on_previous_text = True
+                    self.chunk_length = 2
+                    self.stride_length = 0.5
+                    self.repetition_penalty = 1.1
+                    self.vad_filter = True
+            
+            config = MinimalConfig(model_size)
     
     return WhisperCT2Model(config)
-
-
-# Utility functions for Whisper-specific operations
-def validate_whisper_model(model_name: str) -> bool:
-    """Validate if a model name is supported by faster-whisper"""
-    valid_models = [
-        "tiny", "tiny.en", "base", "base.en", "small", "small.en",
-        "medium", "medium.en", "large", "large-v1", "large-v2", "large-v3",
-        "ct2-fast-whisper-tiny", "ct2-fast-whisper-small", "ct2-fast-whisper-medium",
-        "deepdml/faster-whisper-large-v3-turbo-ct2"
-    ]
-    
-    # Check if it's a direct model name or path
-    return (
-        model_name in valid_models or
-        model_name.startswith("ct2-") or 
-        "/" in model_name  # Assume it's a HuggingFace model path
-    )
-
-
-def estimate_memory_usage(model_name: str, compute_type: str = "float16") -> dict:
-    """Estimate memory usage for a Whisper model"""
-    # Rough estimates in MB
-    model_sizes = {
-        "tiny": {"float32": 150, "float16": 75, "int8": 40},
-        "base": {"float32": 290, "float16": 145, "int8": 75},
-        "small": {"float32": 970, "float16": 485, "int8": 245},
-        "medium": {"float32": 3000, "float16": 1500, "int8": 750},
-        "large": {"float32": 6000, "float16": 3000, "int8": 1500},
-    }
-    
-    # Extract base model name
-    base_name = model_name.split("-")[-1] if "-" in model_name else model_name
-    base_name = base_name.replace(".en", "")
-    
-    if base_name in model_sizes:
-        return {
-            "model_size_mb": model_sizes[base_name].get(compute_type, 1000),
-            "recommended_ram_mb": model_sizes[base_name].get(compute_type, 1000) * 2,
-            "compute_type": compute_type
-        }
-    
-    return {"model_size_mb": 1000, "recommended_ram_mb": 2000, "compute_type": compute_type}
-
-
-# Language mapping for Whisper compatibility
-LANGUAGE_MAPPING = {
-    # Full name -> ISO code (for Whisper)
-    'arabic': 'ar',
-    'english': 'en',
-    'spanish': 'es',
-    'french': 'fr',
-    'german': 'de',
-    'italian': 'it',
-    'portuguese': 'pt',
-    'russian': 'ru',
-    'chinese': 'zh',
-    'japanese': 'ja',
-    'korean': 'ko',
-    # Reverse mapping (ISO -> full name)
-    'ar': 'arabic',
-    'en': 'english',
-    'es': 'spanish',
-    'fr': 'french',
-    'de': 'german',
-    'it': 'italian',
-    'pt': 'portuguese',
-    'ru': 'russian',
-    'zh': 'chinese',
-    'ja': 'japanese',
-    'ko': 'korean'
-}
-
-
-def map_language_to_iso(language: str) -> str:
-    """Convert full language name to ISO code for Whisper"""
-    if language in LANGUAGE_MAPPING:
-        mapped = LANGUAGE_MAPPING[language]
-        # If it's already an ISO code, return as is, otherwise return the mapped ISO code
-        return mapped if len(mapped) == 2 else language
-    return language  # Return as-is if not found
-
-
-def map_language_to_full(language: str) -> str:
-    """Convert ISO code to full language name"""
-    return LANGUAGE_MAPPING.get(language, language) 
