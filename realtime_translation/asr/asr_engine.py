@@ -4,15 +4,7 @@ from typing import List, Dict, Optional, Union, Iterator
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
-# Handle config import with fallback
-try:
-    from ..config import get_config
-except ImportError:
-    # Fallback for when running as standalone module
-    import sys
-    import os
-    sys.path.append(os.path.dirname(os.path.dirname(__file__)))
-    from config import get_config
+from config import get_config
 
 
 @dataclass
@@ -50,13 +42,15 @@ class ASRResult:
     def get_duration(self) -> float:
         """Get total duration covered by segments"""
         if not self.segments:
-            return 0.0
+            raise ValueError("No segments available")
         return max(segment.end for segment in self.segments) - min(segment.start for segment in self.segments)
     
-    def get_average_confidence(self) -> Optional[float]:
+    def get_average_confidence(self) -> float:
         """Get average confidence across all segments"""
         confidences = [seg.confidence for seg in self.segments if seg.confidence is not None]
-        return sum(confidences) / len(confidences) if confidences else None
+        if not confidences:
+            raise ValueError("No confidence scores available")
+        return sum(confidences) / len(confidences)
     
     def to_dict(self) -> Dict:
         """Convert to dictionary for serialization"""
@@ -85,23 +79,10 @@ class ASRResult:
 class ASREngine(ABC):
     """Abstract base class for ASR engines"""
     
-    def __init__(self, config=None):
-        try:
-            self.config = config or get_config().asr
-        except:
-            # Fallback config for testing
-            self.config = type('Config', (), {
-                'model': 'tiny',
-                'language': 'ar',
-                'compute_type': 'auto',
-                'beam_size': 1,
-                'best_of': 1,
-                'temperature': 0.0,
-                'condition_on_previous_text': True,
-                'chunk_length': 30,
-                'stride_length': 5
-            })()
-            
+    def __init__(self, config):
+        if config is None:
+            raise ValueError("Configuration is required")
+        self.config = config
         self.model_name = self.config.model
         self.language = self.config.language
         self.is_loaded = False
@@ -153,131 +134,13 @@ class ASREngine(ABC):
         }
 
 
-class ASRManager:
-    """Manager class for handling ASR operations with performance monitoring"""
-    
-    def __init__(self, engine: ASREngine):
-        self.engine = engine
-        try:
-            self.config = get_config()
-        except:
-            self.config = None
-        self.performance_stats = {
-            'total_requests': 0,
-            'total_audio_duration': 0.0,
-            'total_processing_time': 0.0,
-            'average_rtf': 0.0,
-            'last_rtf': 0.0
-        }
-    
-    def transcribe(self, audio: Union[np.ndarray, str], **kwargs) -> ASRResult:
-        """
-        Transcribe audio with performance monitoring
-        
-        Args:
-            audio: Audio data or file path
-            **kwargs: Additional parameters for transcription
-            
-        Returns:
-            ASRResult with transcription and performance metrics
-        """
-        start_time = time.time()
-        
-        # Ensure model is loaded
-        if not self.engine.is_loaded:
-            self.engine.load_model()
-        
-        # Perform transcription
-        result = self.engine.transcribe(audio, **kwargs)
-        
-        # Calculate performance metrics
-        processing_time = time.time() - start_time
-        result.processing_time = processing_time
-        
-        if result.audio_duration and result.audio_duration > 0:
-            result.real_time_factor = processing_time / result.audio_duration
-        
-        # Update performance statistics
-        self._update_stats(result)
-        
-        return result
-    
-    def transcribe_streaming(self, audio_chunks: Iterator[np.ndarray], **kwargs) -> Iterator[ASRResult]:
-        """
-        Transcribe audio in streaming mode with performance monitoring
-        
-        Args:
-            audio_chunks: Iterator of audio chunks
-            **kwargs: Additional parameters
-            
-        Yields:
-            ASRResult for each chunk with performance metrics
-        """
-        # Ensure model is loaded
-        if not self.engine.is_loaded:
-            self.engine.load_model()
-        
-        for result in self.engine.transcribe_streaming(audio_chunks, **kwargs):
-            self._update_stats(result)
-            yield result
-    
-    def _update_stats(self, result: ASRResult) -> None:
-        """Update performance statistics"""
-        self.performance_stats['total_requests'] += 1
-        
-        if result.audio_duration:
-            self.performance_stats['total_audio_duration'] += result.audio_duration
-        
-        if result.processing_time:
-            self.performance_stats['total_processing_time'] += result.processing_time
-        
-        if result.real_time_factor:
-            self.performance_stats['last_rtf'] = result.real_time_factor
-            
-            # Update average RTF
-            total_requests = self.performance_stats['total_requests']
-            if total_requests > 1:
-                old_avg = self.performance_stats['average_rtf']
-                self.performance_stats['average_rtf'] = (
-                    old_avg * (total_requests - 1) + result.real_time_factor
-                ) / total_requests
-            else:
-                self.performance_stats['average_rtf'] = result.real_time_factor
-    
-    def get_performance_stats(self) -> Dict:
-        """Get current performance statistics"""
-        stats = self.performance_stats.copy()
-        
-        # Add derived metrics
-        if stats['total_audio_duration'] > 0:
-            stats['overall_rtf'] = stats['total_processing_time'] / stats['total_audio_duration']
-        else:
-            stats['overall_rtf'] = 0.0
-        
-        return stats
-    
-    def reset_stats(self) -> None:
-        """Reset performance statistics"""
-        self.performance_stats = {
-            'total_requests': 0,
-            'total_audio_duration': 0.0,
-            'total_processing_time': 0.0,
-            'average_rtf': 0.0,
-            'last_rtf': 0.0
-        }
-    
-    def get_model_info(self) -> Dict:
-        """Get information about the ASR engine and model"""
-        return self.engine.get_model_info()
-
-
 # Utility functions for ASR processing
-def calculate_audio_duration(audio: np.ndarray, sample_rate: int = 16000) -> float:
+def calculate_audio_duration(audio: np.ndarray, sample_rate: int) -> float:
     """Calculate duration of audio array in seconds"""
     return len(audio) / sample_rate
 
 
-def merge_segments(segments: List[ASRSegment], max_gap: float = 0.5) -> List[ASRSegment]:
+def merge_segments(segments: List[ASRSegment], max_gap: float) -> List[ASRSegment]:
     """
     Merge consecutive segments with small gaps
     
@@ -315,8 +178,3 @@ def merge_segments(segments: List[ASRSegment], max_gap: float = 0.5) -> List[ASR
             merged.append(segment)
     
     return merged
-
-
-def filter_by_confidence(segments: List[ASRSegment], min_confidence: float = 0.5) -> List[ASRSegment]:
-    """Filter segments by minimum confidence threshold"""
-    return [seg for seg in segments if seg.confidence is None or seg.confidence >= min_confidence] 
