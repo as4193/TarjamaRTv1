@@ -1,0 +1,65 @@
+# Real-time Translation System Configuration
+
+# Audio Settings
+audio:
+  sample_rate: 16000
+  format: "wav"
+
+# VAD Configuration
+vad:
+  model: "pyannote"
+  threshold: 0.5
+  min_speech_duration: 0.25
+  min_silence_duration: 0.1
+  speech_pad_ms: 30
+  window_size: 512
+  sample_rate: 16000
+  chunk_size: 1024
+  aggressiveness: 2
+  frame_duration_ms: 30
+
+# ASR Configuration
+asr:
+  model: "deepdml/faster-whisper-large-v3-turbo-ct2"
+  language: "auto"
+  compute_type: "float16"
+  local_files_only: False
+  beam_size: 5
+  best_of: 3
+  temperature: 0.0
+  condition_on_previous_text: true
+  chunk_length: 2
+  stride_length: 0.5
+  repetition_penalty: 1.1
+  vad_filter: true
+
+# Streaming Configuration
+streaming:
+  chunk_size: 2.0  # seconds
+  overlap_ratio: 0.5  # 0.5 seconds overlap
+  sample_rate: 16000
+
+# OpenAI Configuration
+openai:
+  api_key: "" #Please add your own API key here
+  model: "gpt-4o-mini"
+  max_tokens: 256
+  temperature: 0.1
+  top_p: 0.9
+  frequency_penalty: 0.5
+  presence_penalty: 0.3
+
+# Machine Translation
+mt:
+  model: "cpatonn/Qwen3-4B-Instruct-2507-AWQ-4bit"
+  host: "localhost"
+  port: 8000
+  source_language: ""  # Will be set dynamically
+  target_language: ""   # Will be set dynamically
+  max_tokens: 512
+  temperature: 0.7
+  top_p: 0.8
+  top_k: 20
+  min_p: 0.0
+  timeout: 30
+  max_retries: 3
