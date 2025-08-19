@@ -1,0 +1,40 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: vllm_service
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/models
+    environment:
+      - CUDA_VISIBLE_DEVICES=0
+    command: >
+      --model cpatonn/Qwen3-4B-Instruct-2507-AWQ-4bit
+              --served-model-name qwen3-4b-instruct-2507-awq-4bit
+      --host 0.0.0.0
+      --port 8000
+      --tensor-parallel-size 1
+              --gpu-memory-utilization 0.5
+      --max-model-len 1024
+      --max-num-seqs 16
+      --trust-remote-code
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ipc: host
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s
+
+networks:
+  default:
+    name: realtime-translation-network
+    driver: bridge
