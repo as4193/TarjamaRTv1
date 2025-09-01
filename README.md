@@ -22,7 +22,7 @@ export OPENAI_API_KEY=your_openai_key_here
 4. **Run vLLM with OpenAI**
 ```bash
 docker pull vllm/vllm-openai:latest
-docker run -d -p 8000:8000 -e OPENAI_API_KEY=$OPENAI_API_KEY vllm/vllm-openai:latest
+docker-compose up -d
 
 
 5. **Start Streamlit app**
