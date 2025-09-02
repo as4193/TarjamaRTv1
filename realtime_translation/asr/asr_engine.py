@@ -4,7 +4,7 @@ from typing import List, Dict, Optional, Union, Iterator
 from dataclasses import dataclass, field
 from abc import ABC, abstractmethod
 
-from config import get_config
+from ..config import get_config
 
 
 @dataclass

@@ -4,7 +4,7 @@ import requests
 import json
 from typing import Dict, Any, Optional
 from dataclasses import dataclass
-from config import MTConfig
+from ..config import MTConfig
 
 logger = logging.getLogger(__name__)
 
