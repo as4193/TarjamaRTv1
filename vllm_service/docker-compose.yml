@@ -6,18 +6,25 @@ services:
       - "8000:8000"
     volumes:
       - ./models:/models
+      - ~/.cache/huggingface:/root/.cache/huggingface
     environment:
       - CUDA_VISIBLE_DEVICES=0
+      - HF_HOME=/root/.cache/huggingface
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - HF_HUB_CACHE=/root/.cache/huggingface
     command: >
       --model cpatonn/Qwen3-4B-Instruct-2507-AWQ-4bit
-              --served-model-name qwen3-4b-instruct-2507-awq-4bit
+      --served-model-name qwen3-4b-instruct-2507-awq-4bit
       --host 0.0.0.0
       --port 8000
       --tensor-parallel-size 1
-              --gpu-memory-utilization 0.5
+      --gpu-memory-utilization 0.4
       --max-model-len 1024
       --max-num-seqs 16
       --trust-remote-code
+      --download-dir /models
+      --enforce-eager
+      --disable-log-requests
     deploy:
       resources:
         reservations:
