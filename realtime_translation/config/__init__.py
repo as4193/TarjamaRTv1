@@ -100,6 +100,44 @@ def get_config() -> Config:
     config.streaming = StreamingConfig()
     config.mt = MTConfig()
     config.openai = OpenAIConfig()
+    
+    # Load settings from config.yaml
+    config_path = Path(__file__).parent / "config.yaml"
+    if config_path.exists():
+        with open(config_path, 'r') as f:
+            yaml_config = yaml.safe_load(f)
+            
+        # Update config with YAML values
+        if 'audio' in yaml_config:
+            for key, value in yaml_config['audio'].items():
+                if hasattr(config.audio, key):
+                    setattr(config.audio, key, value)
+        
+        if 'vad' in yaml_config:
+            for key, value in yaml_config['vad'].items():
+                if hasattr(config.vad, key):
+                    setattr(config.vad, key, value)
+        
+        if 'asr' in yaml_config:
+            for key, value in yaml_config['asr'].items():
+                if hasattr(config.asr, key):
+                    setattr(config.asr, key, value)
+        
+        if 'streaming' in yaml_config:
+            for key, value in yaml_config['streaming'].items():
+                if hasattr(config.streaming, key):
+                    setattr(config.streaming, key, value)
+        
+        if 'mt' in yaml_config:
+            for key, value in yaml_config['mt'].items():
+                if hasattr(config.mt, key):
+                    setattr(config.mt, key, value)
+        
+        if 'openai' in yaml_config:
+            for key, value in yaml_config['openai'].items():
+                if hasattr(config.openai, key):
+                    setattr(config.openai, key, value)
+    
     return config
 
 
