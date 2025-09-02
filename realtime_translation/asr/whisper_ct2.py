@@ -103,6 +103,10 @@ class WhisperCT2Model(ASREngine):
             print(f"Loading Whisper model: {self.config.model}")
             print(f"Device: {self.device}")
             print(f"Compute type: {self.compute_type}")
+            print(f"Local files only: {self.config.local_files_only}")
+            
+            if not self.config.local_files_only:
+                print("📥 Downloading model from Hugging Face (this may take a few minutes)...")
             
             self.model = WhisperModel(
                 self.config.model,
@@ -115,6 +119,8 @@ class WhisperCT2Model(ASREngine):
             
         except Exception as e:
             print(f"❌ Failed to load model: {e}")
+            import traceback
+            traceback.print_exc()
             raise
     
     def transcribe(self, audio: Union[np.ndarray, str], **kwargs) -> ASRResult:
