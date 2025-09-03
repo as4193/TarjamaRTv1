@@ -1,6 +1,23 @@
 # TarjamaRTv1
 
-Real-time translation app using Streamlit and OpenAI.
+A multilingual real-time speech translation system supporting bidirectional translation between 99 languages with context-aware ASR correction.
+
+## Key Features
+
+- **99 Languages**: Bidirectional translation supporting 9,801 translation directions
+- **Context-Aware Correction**: LLM-powered ASR error correction using temporal context to fix boundary artifacts
+- **Voice Activity Detection**: Reduces hallucinations by removing silence segments
+- **Optimized Streaming**: 2-second chunks with 0.5-second overlap for continuous processing
+- **Modular Architecture**: Cascaded pipeline allowing component-wise optimization
+
+## System Architecture
+
+The system implements a 5-component pipeline:
+1. **Voice Activity Detection** (pyannote/voice-activity-detection)
+2. **Automatic Speech Recognition** (deepdml/faster-whisper-large-v3-turbo-ct2)
+3. **Context-Aware ASR Correction** (GPT-4o-mini)
+4. **Jaccard Validation** 
+5. **Machine Translation** (vLLM-served cpatonn/Qwen3-4B-Instruct-2507-AWQ-4bit)
 
 ## Requirements
 
