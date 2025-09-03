@@ -12,21 +12,13 @@ This guide will walk you through using the real-time translation system with bot
 
 ## 🎙️ Live Recording Workflow
 
-### Step 1: Choose Source Language
-![Step 1: Source Language Selection](images/image1.png)
-*Select your source language from the dropdown menu. This is the language you will be speaking.*
+![Live Recording Interface](images/image1.png)
 
-### Step 2: Choose Target Language
-![Step 2: Target Language Selection](images/image1.png)
-*Select your target language from the dropdown menu. This is the language you want your speech translated to.*
-
-### Step 3: Enable/Disable ASR Correction
-![Step 3: ASR Correction Toggle](images/image1.png)
-*Toggle ASR correction on/off. When enabled, the system will use AI to improve transcription quality by removing duplicate words and fixing spelling mistakes.*
-
-### Step 4: Start Recording
-![Step 4: Start Recording](images/image1.png)
-*Click the "Start Recording" button to begin live translation. The system will process your speech in real-time.*
+### Steps:
+1. **Choose Source Language** - Select the language you will be speaking
+2. **Choose Target Language** - Select the language you want your speech translated to  
+3. **Enable/Disable ASR Correction** - Toggle AI-powered transcription improvements (recommended)
+4. **Start Recording** - Click the "Start Recording" button to begin live translation
 
 ### Results: Live Translation Output
 ![Live Translation Results](images/image4.png)
@@ -36,13 +28,11 @@ This guide will walk you through using the real-time translation system with bot
 
 ## 📁 File Upload Workflow
 
-### Step 1: Choose Audio File
-![Step 1: File Selection](images/image2.png)
-*Click "Choose an audio file" to upload an audio file for processing. Supported formats include .m4a, .mp3, .wav, and more.*
+![File Upload Interface](images/image2.png)
 
-### Step 2: Process the File
-![Step 2: Process File](images/image3.png)
-*After selecting your file, click "Process Audio File" to begin transcription and translation.*
+### Steps:
+1. **Choose Audio File** - Click "Choose an audio file" to upload your audio (supports .m4a, .mp3, .wav, and more)
+2. **Process the File** - Click "Process Audio File" to begin transcription and translation
 
 ### Results: File Processing Output
 ![File Processing Results](images/image3.png)
