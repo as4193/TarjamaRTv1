@@ -26,6 +26,9 @@ Before setting up the project, ensure you have:
 - **Python 3.11** (required)
 - **GPU with 6-10 GB VRAM** (to run VAD + ASR + MT models)
 - **OpenAI API Key** (required for ASR Correction)
+- **~80 GB free storage** (for models, dependencies, and Docker images)
+
+**Note:** This project was developed and tested on Windows. You may encounter issues when running on other operating systems.
 
 ## Setup
 
@@ -46,6 +49,13 @@ pip install -r requirements.txt
 ```
 
 4. **Set OpenAI API key**
+
+**Windows (PowerShell):**
+```powershell
+$env:OPENAI_API_KEY="your_openai_key_here"
+```
+
+**Linux/Mac:**
 ```bash
 export OPENAI_API_KEY=your_openai_key_here
 ```
@@ -62,6 +72,7 @@ docker pull vllm/vllm-openai:latest
 docker-compose up -d
 #You should be in vllm_service folder 
 ```
+**Note:** This step may take 10-20 minutes depending on your internet speed, as the model will be downloaded from Hugging Face and then loaded into GPU.
 
 7. **Start Streamlit app**
 ```bash
