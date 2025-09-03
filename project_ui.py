@@ -186,7 +186,6 @@ class LiveTranslationSystem:
     
     def audio_recording_loop(self):
         """Main audio recording loop with dynamic chunk processing."""
-        print("Audio recording loop started")
         try:
             with sd.InputStream(
                 samplerate=self.sample_rate, 
@@ -223,13 +222,10 @@ class LiveTranslationSystem:
                     time.sleep(AUDIO_PROCESSING_SLEEP)
                     
         except Exception as e:
-            print(f"Audio recording error: {e}")
             st.error(f"Audio recording error: {str(e)}")
-        print("Audio recording loop ended")
     
     def audio_processing_loop(self):
         """Process audio chunks from the queue."""
-        print("Audio processing loop started")
         processed_count = 0
         
         while self.is_recording:
@@ -238,17 +234,12 @@ class LiveTranslationSystem:
                     audio_chunk = self.audio_queue.get()
                     processed_count += 1
                     
-                    print(f"Processing chunk {processed_count}, queue size: {self.audio_queue.qsize()}")
                     self._process_audio_chunk(audio_chunk)
-                    print(f"Completed processing chunk {processed_count}")
                     
                 time.sleep(AUDIO_QUEUE_SLEEP)
                 
             except Exception as e:
-                print(f"Audio processing error: {e}")
                 st.error(f"Processing error: {str(e)}")
-        
-        print("Audio processing loop ended")
     
     def _process_audio_chunk(self, audio_chunk: np.ndarray):
         """Process a single audio chunk through the VAD-ASR-MT pipeline."""
@@ -271,7 +262,6 @@ class LiveTranslationSystem:
                 self._process_speech_segment(segment_audio)
                     
         except Exception as e:
-            print(f"Pipeline processing error: {e}")
             st.error(f"Pipeline error: {str(e)}")
     
     def _process_speech_segment(self, segment_audio: np.ndarray):
@@ -294,6 +284,13 @@ class LiveTranslationSystem:
                     corrected_text = self._correct_asr_text(original_text)
                     similarity_score = self._calculate_text_similarity(original_text, corrected_text)
                     final_text = corrected_text if similarity_score >= ASR_CORRECTION_SIMILARITY_THRESHOLD else original_text
+                    
+                    # Debug: Show what's happening with ASR correction
+                    print(f"ASR Correction Debug:")
+                    print(f"  Original: '{original_text}'")
+                    print(f"  Corrected: '{corrected_text}'")
+                    print(f"  Similarity: {similarity_score:.3f} (threshold: {ASR_CORRECTION_SIMILARITY_THRESHOLD})")
+                    print(f"  Using: {'CORRECTED' if similarity_score >= ASR_CORRECTION_SIMILARITY_THRESHOLD else 'ORIGINAL'}")
                 else:
                     final_text = original_text
                 
@@ -302,7 +299,7 @@ class LiveTranslationSystem:
                 
                 # Store result
                 result = {
-                    'original': original_text,
+                    'original': final_text, 
                     'translation': translation,
                     'timestamp': time.time()
                 }
@@ -311,7 +308,7 @@ class LiveTranslationSystem:
                 print(f"Processed: {original_text[:50]}... → {translation[:50]}...")
                 
         except Exception as e:
-            print(f"Error processing speech segment: {e}")
+            st.error(f"Error processing speech segment: {str(e)}")
         finally:
             # Clean up temporary file
             if temp_file_path and os.path.exists(temp_file_path):
@@ -359,7 +356,7 @@ class LiveTranslationSystem:
             return text
                 
         except Exception as e:
-            print(f"ASR correction error: {type(e).__name__}: {e}")
+            st.error(f"ASR correction error: {str(e)}")
             return text
     
     def _calculate_text_similarity(self, text1: str, text2: str) -> float:
@@ -374,7 +371,6 @@ class LiveTranslationSystem:
             return intersection / union if union > 0 else 0.0
             
         except Exception as e:
-            print(f"Text similarity calculation error: {e}")
             return 0.0
     
     def _translate_text(self, text: str) -> str:
@@ -391,7 +387,7 @@ class LiveTranslationSystem:
             return "Translation failed"
                 
         except Exception as e:
-            print(f"Translation error: {e}")
+            st.error(f"Translation error: {str(e)}")
             return f"Translation error: {str(e)}"
     
     def _get_context_before(self) -> Optional[str]:
@@ -529,7 +525,6 @@ class LiveTranslationSystem:
     
     def _file_processing_loop(self):
         """Background file processing loop - mimics audio_processing_loop."""
-        print("File processing loop started")
         
         try:
             # Get audio processing configuration
@@ -547,7 +542,7 @@ class LiveTranslationSystem:
                 # Extract chunk
                 audio_chunk = audio_buffer[:chunk_samples]
                 
-                print(f"Processing file chunk {chunk_count}: {len(audio_chunk)} samples")
+
                 
                 self._process_audio_chunk(audio_chunk)
                 
@@ -563,15 +558,12 @@ class LiveTranslationSystem:
             # Process remaining audio
             if len(audio_buffer) > 0 and len(audio_buffer) >= self.sample_rate * 0.5 and self.file_processing:
                 chunk_count += 1
-                print(f"Processing final file chunk {chunk_count}: {len(audio_buffer)} samples")
                 self._process_audio_chunk(audio_buffer)
             
             # Calculate total processing time
             end_time = time.time()
             total_time = end_time - self.file_processing_start_time
-            
-            print(f"File processing completed: {chunk_count} chunks, {len(self.current_segments)} segments")
-            print(f"Total processing time: {total_time:.2f} seconds")
+    
             
             # Store completion info for UI display
             self.file_processing_completed = True
@@ -580,10 +572,8 @@ class LiveTranslationSystem:
             self.file_processing = False
             
         except Exception as e:
-            print(f"File processing error: {e}")
+            st.error(f"File processing error: {str(e)}")
             self.file_processing = False
-        
-        print("File processing loop ended")
     
 
 def main():
@@ -936,7 +926,6 @@ def _render_file_upload(system):
                             st.write("❌ Processing failed!")
                     except Exception as e:
                         st.error(f"Error during processing: {str(e)}")
-                        print(f"Processing error: {e}")
         else:
             st.button(
                 "📁 Upload an audio file first", 
